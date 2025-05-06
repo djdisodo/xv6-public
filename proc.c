@@ -112,6 +112,8 @@ found:
   memset(p->context, 0, sizeof *p->context);
   p->context->eip = (uint)forkret;
 
+  p->nice = 20;
+
   return p;
 }
 
@@ -332,24 +334,29 @@ scheduler(void)
 
     // Loop over process table looking for process to run.
     acquire(&ptable.lock);
-    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
-      if(p->state != RUNNABLE)
-        continue;
+    for(uchar nice = 0; nice <= MAXNICE; nice++) {
+      for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+        if(p->nice != nice)
+          continue;
+        if(p->state != RUNNABLE)
+          continue;
 
-      // Switch to chosen process.  It is the process's job
-      // to release ptable.lock and then reacquire it
-      // before jumping back to us.
-      c->proc = p;
-      switchuvm(p);
-      p->state = RUNNING;
+        // Switch to chosen process.  It is the process's job
+        // to release ptable.lock and then reacquire it
+        // before jumping back to us.
+        c->proc = p;
+        switchuvm(p);
+        p->state = RUNNING;
 
-      swtch(&(c->scheduler), p->context);
-      switchkvm();
+        swtch(&(c->scheduler), p->context);
+        switchkvm();
 
-      // Process is done running for now.
-      // It should have changed its p->state before coming back.
-      c->proc = 0;
+        // Process is done running for now.
+        // It should have changed its p->state before coming back.
+        c->proc = 0;
+      }
     }
+
     release(&ptable.lock);
 
   }
@@ -531,4 +538,63 @@ procdump(void)
     }
     cprintf("\n");
   }
+}
+
+
+int
+getnice(int pid) {
+  struct proc *p;
+  acquire(&ptable.lock);
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+    if (p->pid == pid && p->state != UNUSED) {
+      release(&ptable.lock);
+      return p->nice;
+    }
+  }
+  release(&ptable.lock);
+  return -1;
+}
+
+int
+setnice(int pid, int nice) {
+  struct proc *p;
+  if (nice < 0 || 40 < nice) return -1;
+  acquire(&ptable.lock);
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+    if (p->pid == pid && p->state != UNUSED) {
+      p->nice = nice;
+      //sched();
+      release(&ptable.lock);
+      return nice;
+    }
+  }
+  release(&ptable.lock);
+  return -1;
+}
+
+void ps(int pid) {
+  struct proc *p;
+  static char *states[] = {
+    [UNUSED]    "unused",
+    [EMBRYO]    "embryo",
+    [SLEEPING]  "sleep ",
+    [RUNNABLE]  "runble",
+    [RUNNING]   "run   ",
+    [ZOMBIE]    "zombie"
+    };
+
+  cprintf("pid\tppid\tprio\tstate\tname\n");
+  acquire(&ptable.lock);
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+    if ((p->pid == pid || pid == 0) && p->state != UNUSED) {
+      int ppid;
+      if (p->parent)
+        ppid = p->parent->pid;
+      else
+        ppid = p->pid;
+      cprintf("%d\t%d\t%d\t%s\t%s\n", p->pid, ppid, p->nice, states[p->state], p->name);
+      if (pid) break;
+    }
+  }
+  release(&ptable.lock);
 }
