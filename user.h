@@ -1,6 +1,6 @@
 struct stat;
 struct rtcdate;
-
+#define VERSION 2022
 // system calls
 int fork(void);
 int exit(void) __attribute__((noreturn));
@@ -23,6 +23,7 @@ int getpid(void);
 char* sbrk(int);
 int sleep(int);
 int uptime(void);
+void yield(void);
 
 // ulib.c
 int stat(const char*, struct stat*);
