@@ -7,10 +7,29 @@
 #include "proc.h"
 #include "spinlock.h"
 
+struct proc *__runnable1[NPROC];
+struct proc *__runnable2[NPROC];
+
 struct {
   struct spinlock lock;
   struct proc proc[NPROC];
-} ptable;
+  struct proc **runnable;
+  unsigned int runnable_cnt;
+} ptable = {
+    .runnable = __runnable1,
+};
+
+struct proc **runnable_swap = __runnable2;
+
+unsigned int swap_runnable() {
+  struct proc **temp_runnable = ptable.runnable;
+  unsigned int runnable_cnt = ptable.runnable_cnt;
+  ptable.runnable = runnable_swap;
+  runnable_swap = temp_runnable;
+  ptable.runnable_cnt = 0;
+  return runnable_cnt;
+}
+// FIFO 큐를 구현, 더블 버퍼링을 이용
 
 static struct proc *initproc;
 
@@ -117,6 +136,13 @@ found:
   return p;
 }
 
+void runnable1(struct proc *p) {
+  if (p->state != RUNNABLE) {
+    p->state = RUNNABLE;
+    ptable.runnable[ptable.runnable_cnt++] = p;
+  }
+}
+
 //PAGEBREAK: 32
 // Set up first user process.
 void
@@ -126,7 +152,7 @@ userinit(void)
   extern char _binary_initcode_start[], _binary_initcode_size[];
 
   p = allocproc();
-  
+
   initproc = p;
   if((p->pgdir = setupkvm()) == 0)
     panic("userinit: out of memory?");
@@ -150,7 +176,8 @@ userinit(void)
   // because the assignment might not be atomic.
   acquire(&ptable.lock);
 
-  p->state = RUNNABLE;
+  //p->state = RUNNABLE;
+  runnable1(p);
 
   release(&ptable.lock);
 }
@@ -216,7 +243,8 @@ fork(void)
 
   acquire(&ptable.lock);
 
-  np->state = RUNNABLE;
+  //np->state = RUNNABLE;
+  runnable1(np);
 
   release(&ptable.lock);
 
@@ -277,7 +305,7 @@ wait(void)
   struct proc *p;
   int havekids, pid;
   struct proc *curproc = myproc();
-  
+
   acquire(&ptable.lock);
   for(;;){
     // Scan through table looking for exited children.
@@ -324,31 +352,32 @@ wait(void)
 void
 scheduler(void)
 {
-  struct proc *p;
+  struct proc **p;
   struct cpu *c = mycpu();
   c->proc = 0;
-  
+
   for(;;){
     // Enable interrupts on this processor.
     sti();
 
     // Loop over process table looking for process to run.
     acquire(&ptable.lock);
+    unsigned int runnable_cnt = swap_runnable();
     for(uchar nice = 0; nice <= MAXNICE; nice++) {
-      for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
-        if(p->nice != nice)
+      for(p = runnable_swap; p < &runnable_swap[runnable_cnt]; p++){
+        if((*p)->nice != nice)
           continue;
-        if(p->state != RUNNABLE)
+        if((*p)->state != RUNNABLE)
           continue;
 
         // Switch to chosen process.  It is the process's job
         // to release ptable.lock and then reacquire it
         // before jumping back to us.
-        c->proc = p;
-        switchuvm(p);
-        p->state = RUNNING;
+        c->proc = *p;
+        switchuvm(*p);
+        (*p)->state = RUNNING;
 
-        swtch(&(c->scheduler), p->context);
+        swtch(&(c->scheduler), (*p)->context);
         switchkvm();
 
         // Process is done running for now.
@@ -393,7 +422,8 @@ void
 yield(void)
 {
   acquire(&ptable.lock);  //DOC: yieldlock
-  myproc()->state = RUNNABLE;
+  //myproc()->state = RUNNABLE;
+  runnable1(myproc());
   sched();
   release(&ptable.lock);
 }
@@ -425,7 +455,7 @@ void
 sleep(void *chan, struct spinlock *lk)
 {
   struct proc *p = myproc();
-  
+
   if(p == 0)
     panic("sleep");
 
@@ -468,7 +498,8 @@ wakeup1(void *chan)
 
   for(p = ptable.proc; p < &ptable.proc[NPROC]; p++)
     if(p->state == SLEEPING && p->chan == chan)
-      p->state = RUNNABLE;
+      //p->state = RUNNABLE;
+      runnable1(p);
 }
 
 // Wake up all processes sleeping on chan.
@@ -494,7 +525,8 @@ kill(int pid)
       p->killed = 1;
       // Wake process from sleep if necessary.
       if(p->state == SLEEPING)
-        p->state = RUNNABLE;
+        //p->state = RUNNABLE;
+        runnable1(p);
       release(&ptable.lock);
       return 0;
     }

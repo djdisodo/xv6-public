@@ -11,13 +11,13 @@ int main(int argc, char **argv){
 
 	pid = fork();
 
-	if(pid == 0){	//Child
+	if(pid == 0){
 		printf(1, "##### State 2 #####\n");
 	}
-	else{			//Parent
-		setnice(pid, 10);	//Set nice value of Child
+	else{
+		setnice(pid, 5);
 		printf(1, "##### State 1 #####\n");
-		wait();				//Scheduling
+		sleep(100);
 		printf(1, "##### State 3 #####\n");
 	}
 
