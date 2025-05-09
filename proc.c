@@ -6,11 +6,38 @@
 #include "x86.h"
 #include "proc.h"
 #include "spinlock.h"
-
 struct {
   struct spinlock lock;
   struct proc proc[NPROC];
+  struct proc *runnable[MAXNICE + 1];
+  struct proc runnable_last[MAXNICE + 1]; // dummy proc to terminate linked list
 } ptable;
+
+void runnable_remove(struct proc *p) {
+  if (p->prev) {
+    p->next->prev = p->prev;
+    *(p->prev) = p->next;
+    p->prev = 0;
+    p->next = 0;
+  }
+}
+
+void runnable_insert(struct proc *p) {
+  p->state = RUNNABLE;
+  if (p->next) {
+    //already in the runnable queue
+    if (p->next->nice != p->nice) {
+      runnable_remove(p);
+    } else {
+      return;
+    }
+  }
+  //add on last
+  p->prev = ptable.runnable_last[p->nice].prev;
+  p->next = &ptable.runnable_last[p->nice];
+  *(p->prev) = p;
+  ptable.runnable_last[p->nice].prev = &p->next;
+}
 
 static struct proc *initproc;
 
@@ -23,6 +50,11 @@ static void wakeup1(void *chan);
 void
 pinit(void)
 {
+  for (uchar i = 0; i <= MAXNICE; i++) {
+    ptable.runnable_last[i].nice = i;
+    ptable.runnable[i] = &ptable.runnable_last[i];
+    ptable.runnable_last[i].prev = &ptable.runnable[i];
+  }
   initlock(&ptable.lock, "ptable");
 }
 
@@ -112,6 +144,8 @@ found:
   memset(p->context, 0, sizeof *p->context);
   p->context->eip = (uint)forkret;
 
+  p->nice = 20;
+
   return p;
 }
 
@@ -124,7 +158,7 @@ userinit(void)
   extern char _binary_initcode_start[], _binary_initcode_size[];
 
   p = allocproc();
-  
+
   initproc = p;
   if((p->pgdir = setupkvm()) == 0)
     panic("userinit: out of memory?");
@@ -148,7 +182,8 @@ userinit(void)
   // because the assignment might not be atomic.
   acquire(&ptable.lock);
 
-  p->state = RUNNABLE;
+  //p->state = RUNNABLE;
+  runnable_insert(p);
 
   release(&ptable.lock);
 }
@@ -198,6 +233,7 @@ fork(void)
   }
   np->sz = curproc->sz;
   np->parent = curproc;
+  np->nice = curproc->nice;
   *np->tf = *curproc->tf;
 
   // Clear %eax so that fork returns 0 in the child.
@@ -214,7 +250,8 @@ fork(void)
 
   acquire(&ptable.lock);
 
-  np->state = RUNNABLE;
+  //np->state = RUNNABLE;
+  runnable_insert(np);
 
   release(&ptable.lock);
 
@@ -275,7 +312,7 @@ wait(void)
   struct proc *p;
   int havekids, pid;
   struct proc *curproc = myproc();
-  
+
   acquire(&ptable.lock);
   for(;;){
     // Scan through table looking for exited children.
@@ -322,17 +359,20 @@ wait(void)
 void
 scheduler(void)
 {
-  struct proc *p;
+  struct proc **p;
   struct cpu *c = mycpu();
   c->proc = 0;
-  
+
   for(;;){
     // Enable interrupts on this processor.
     sti();
 
     // Loop over process table looking for process to run.
     acquire(&ptable.lock);
-    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+    for(uchar sched_nice = 0; sched_nice <= MAXNICE; sched_nice++) {
+      struct proc *p = ptable.runnable[sched_nice]; //peak
+      if (p == &ptable.runnable_last[sched_nice]) continue;
+      runnable_remove(p); //pop
       if(p->state != RUNNABLE)
         continue;
 
@@ -349,7 +389,9 @@ scheduler(void)
       // Process is done running for now.
       // It should have changed its p->state before coming back.
       c->proc = 0;
+      break;
     }
+
     release(&ptable.lock);
 
   }
@@ -386,7 +428,8 @@ void
 yield(void)
 {
   acquire(&ptable.lock);  //DOC: yieldlock
-  myproc()->state = RUNNABLE;
+  //myproc()->state = RUNNABLE;
+  runnable_insert(myproc());
   sched();
   release(&ptable.lock);
 }
@@ -418,7 +461,7 @@ void
 sleep(void *chan, struct spinlock *lk)
 {
   struct proc *p = myproc();
-  
+
   if(p == 0)
     panic("sleep");
 
@@ -461,7 +504,8 @@ wakeup1(void *chan)
 
   for(p = ptable.proc; p < &ptable.proc[NPROC]; p++)
     if(p->state == SLEEPING && p->chan == chan)
-      p->state = RUNNABLE;
+      //p->state = RUNNABLE;
+      runnable_insert(p);
 }
 
 // Wake up all processes sleeping on chan.
@@ -487,7 +531,8 @@ kill(int pid)
       p->killed = 1;
       // Wake process from sleep if necessary.
       if(p->state == SLEEPING)
-        p->state = RUNNABLE;
+        //p->state = RUNNABLE;
+        runnable_insert(p);
       release(&ptable.lock);
       return 0;
     }
@@ -531,4 +576,65 @@ procdump(void)
     }
     cprintf("\n");
   }
+}
+
+
+int
+getnice(int pid) {
+  struct proc *p;
+  acquire(&ptable.lock);
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+    if (p->pid == pid && p->state != UNUSED) {
+      release(&ptable.lock);
+      return p->nice;
+    }
+  }
+  release(&ptable.lock);
+  return -1;
+}
+
+int
+setnice(int pid, int nice) {
+  struct proc *p;
+  if (nice < 0 || 40 < nice) return -1;
+  acquire(&ptable.lock);
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+    if (p->pid == pid && p->state != UNUSED) {
+      p->nice = nice;
+      runnable_insert(myproc());
+      runnable_insert(p);
+      sched();
+      release(&ptable.lock);
+      return nice;
+    }
+  }
+  release(&ptable.lock);
+  return -1;
+}
+
+void ps(int pid) {
+  struct proc *p;
+  static char *states[] = {
+    [UNUSED]    "unused",
+    [EMBRYO]    "embryo",
+    [SLEEPING]  "sleep ",
+    [RUNNABLE]  "runble",
+    [RUNNING]   "run   ",
+    [ZOMBIE]    "zombie"
+    };
+
+  cprintf("pid\tppid\tprio\tstate\tname\n");
+  acquire(&ptable.lock);
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+    if ((p->pid == pid || pid == 0) && p->state != UNUSED) {
+      int ppid;
+      if (p->parent)
+        ppid = p->parent->pid;
+      else
+        ppid = p->pid;
+      cprintf("%d\t%d\t%d\t%s\t%s\n", p->pid, ppid, p->nice, states[p->state], p->name);
+      if (pid) break;
+    }
+  }
+  release(&ptable.lock);
 }
