@@ -29,7 +29,6 @@ unsigned int swap_runnable() {
   ptable.runnable_cnt = 0;
   return runnable_cnt;
 }
-// FIFO 큐를 구현, 더블 버퍼링을 이용
 
 static struct proc *initproc;
 
@@ -227,6 +226,7 @@ fork(void)
   }
   np->sz = curproc->sz;
   np->parent = curproc;
+  np->nice = curproc->nice;
   *np->tf = *curproc->tf;
 
   // Clear %eax so that fork returns 0 in the child.
@@ -341,6 +341,9 @@ wait(void)
   }
 }
 
+uchar sched_nice = 0;
+uchar sched_break = 0;
+
 //PAGEBREAK: 42
 // Per-CPU process scheduler.
 // Each CPU calls scheduler() after setting itself up.
@@ -363,9 +366,9 @@ scheduler(void)
     // Loop over process table looking for process to run.
     acquire(&ptable.lock);
     unsigned int runnable_cnt = swap_runnable();
-    for(uchar nice = 0; nice <= MAXNICE; nice++) {
+    for(sched_nice = 0; sched_nice <= MAXNICE; sched_nice++) {
       for(p = runnable_swap; p < &runnable_swap[runnable_cnt]; p++){
-        if((*p)->nice != nice)
+        if((*p)->nice != sched_nice)
           continue;
         if((*p)->state != RUNNABLE)
           continue;
@@ -383,6 +386,10 @@ scheduler(void)
         // Process is done running for now.
         // It should have changed its p->state before coming back.
         c->proc = 0;
+        if(sched_break) {
+          sched_break = 0;
+          break;
+        }
       }
     }
 
@@ -595,7 +602,12 @@ setnice(int pid, int nice) {
   for(p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
     if (p->pid == pid && p->state != UNUSED) {
       p->nice = nice;
-      //sched();
+      if (nice < sched_nice) {
+        sched_nice = nice;
+        sched_break = 1;
+      }
+      runnable1(myproc());
+      sched();
       release(&ptable.lock);
       return nice;
     }
